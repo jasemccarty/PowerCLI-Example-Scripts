@@ -22,6 +22,145 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+Function Set-VsanEncryption {
+   <#
+   .SYNOPSIS
+      This function will enable or disable vSAN Encryption for a vSAN Cluster.
+
+   .DESCRIPTION
+      This function will enable or disable vSAN Encryption for a vSAN Cluster. 
+
+   .PARAMETER Cluster
+       Specifies the Cluster to set the KMS server for
+ 
+   .PARAMETER KmsCluster
+       Use to set the KMS Cluster to be used with vSAN Encryption
+          
+   .PARAMETER ReducedRedundancy
+      For clusters that have 4 or more hosts, this will allow for reduced redundancy. 
+      For clusters that have 2 or 3 hosts, this does not need to be set (can be).
+
+   .EXAMPLE
+      C:\PS>Set-VsanEncryption -Cluster "ClusterName" -Enabled $true/$false -KmsCluster "KmsCluster" -ReducedRedundancy $true/$false
+
+   #>
+
+   # Set our Parameters
+   [CmdletBinding()]Param(
+   [Parameter(Mandatory = $True)][String]$Cluster,
+   [Parameter(Mandatory = $True)][Boolean]$Enabled,
+   [Parameter(Mandatory = $False)][String]$KmsCluster,
+   [Parameter(Mandatory = $False)][Boolean]$ReducedRedundancy
+   )
+
+   # Get the Cluster 
+   $VsanCluster = Get-Cluster -Name $Cluster
+
+   # Get the list of KMS Servers that are included 
+   $KmsClusterList = Get-KmsCluster
+
+   # Was a KMS Cluster Specified? 
+   #     Specified: Is it in the list?
+   #                Is it not in the list?
+   # Not Specified: Present a list 
+
+   If ($KmsCluster) {
+      If ($KmsClusterList.Name.Contains($KmsCluster)) {
+         Write-Host "$KmsCluster In the list, proceeding" -ForegroundColor Green
+         $KmsClusterProfile = $KmsClusterList | Where-Object {$_.Name -eq $KmsCluster}
+      } else {
+            
+         $Count = 0
+         Foreach ($KmsClusterItem in $KmsClusterList) {
+            Write-Host "$Count) $KmsClusterItem "
+            $Count = $Count + 1
+         }
+         
+         $KmsClusterEntry = Read-Host -Prompt "$KmsCluster is not valid, please select one of the existing KMS Clusters to use" 
+         Write-Host $KmsClusterList[$KmsClusterEntry]
+         $KmsClusterProfile = $KmsClusterList[$KmsClusterEntry]
+        }
+   } else {
+            
+      $Count = 0
+      Foreach ($KmsClusterItem in $KmsClusterList) {
+         Write-Host "$Count) $KmsClusterItem "
+         $Count = $Count + 1
+      }
+      
+      $KmsClusterEntry = Read-Host -Prompt "No KMS provided, please select one of the existing KMS Clusters to use" 
+      Write-Host $KmsClusterList[$KmsClusterEntry]
+      $KmsClusterProfile = $KmsClusterList[$KmsClusterEntry]
+   }
+
+   # Get the vSAN Cluster Configuration View
+   $VsanVcClusterConfig = Get-VsanView -Id "VsanVcClusterConfigSystem-vsan-cluster-config-system"
+
+   # Get Encryption State
+   $EncryptedVsan = $VsanVcClusterConfig.VsanClusterGetConfig($VsanCluster.ExtensionData.MoRef).DataEncryptionConfig
+
+   # Get a count of hosts to guarantee reduced redundancy for 2 and 3 node clusters
+   $HostCount = $VsanCluster | Select @{n="count";e={($_ | Get-VMHost).Count}}
+
+   # If reduced redundancy is specified, or there are less than 4 hosts, force reduced redundancy
+   If (($ReducedRedundancy -eq $true) -or ($HostCount.Value -lt 4)) {
+      $ReducedRedundancy = $true 
+   }
+
+   # If vSAN is enabled and it is Encrypted
+   If($VsanCluster.vSanEnabled){
+   
+      Switch ($Enabled) {
+         # Disabling vSAN Encryption if it is enabled
+         $false {
+            If ($EncryptedVsan.EncryptionEnabled -eq $true) {
+
+               # Setup the Data Encryption Configuration Specification
+               $DataEncryptionConfigSpec = New-Object VMware.Vsan.Views.VsanDataEncryptionConfig
+               $DataEncryptionConfigSpec.EncryptionEnabled = $false
+
+               # Set the Reconfigure Specification to use the Data Encryption Configuration Spec
+               $vsanReconfigSpec = New-Object VMware.Vsan.Views.VimVsanReconfigSpec
+               $vsanReconfigSpec.DataEncryptionConfig = $DataEncryptionConfigSpec
+               $vsanReconfigSpec.AllowReducedRedundancy = $ReducedRedundancy            
+
+               # Execute the task of changing the KMS Cluster Profile Being Used
+               $DisableVsanEncryption = $VsanVcClusterConfig.VsanClusterReconfig($VsanCluster.ExtensionData.MoRef,$vsanReconfigSpec)      
+
+            } else {
+               Write-Host "vSAN Encryption is not enabled on $VsanCluster"
+            }
+         }
+         # Enabling vSAN Encryption if it is not enabled
+         $true {
+            If ($EncryptedVsan.EncryptionEnabled -ne $true) {
+               Write-Host "Enabling vSAN Encryption on Cluster $VsanCluster, using KMS $KmsClusterProfile"
+
+               # Setup the KMS Provider Id Specification
+               $KmsProviderIdSpec = New-Object VMware.Vim.KeyProviderId
+               $KmsProviderIdSpec.Id = $KmsClusterProfile.Name
+         
+               # Setup the Data Encryption Configuration Specification
+               $DataEncryptionConfigSpec = New-Object VMware.Vsan.Views.VsanDataEncryptionConfig
+               $DataEncryptionConfigSpec.KmsProviderId = $KmsProviderIdSpec
+               $DataEncryptionConfigSpec.EncryptionEnabled = $true
+         
+               # Set the Reconfigure Specification to use the Data Encryption Configuration Spec
+               $vsanReconfigSpec = New-Object VMware.Vsan.Views.VimVsanReconfigSpec
+               $vsanReconfigSpec.DataEncryptionConfig = $DataEncryptionConfigSpec
+               $vsanReconfigSpec.AllowReducedRedundancy = $ReducedRedundancy
+               
+               # Execute the task of changing the KMS Cluster Profile Being Used
+               $EnableVsanEncryption = $VsanVcClusterConfig.VsanClusterReconfig($VsanCluster.ExtensionData.MoRef,$vsanReconfigSpec)
+
+            } else {
+               Write-Host "vSAN Encryption is already enabled on $VsanCluster"
+            }
+         }
+      }
+   }
+
+}
 
 Function Invoke-VsanEncryptionRekey {
    <#
@@ -70,26 +209,26 @@ Function Invoke-VsanEncryptionRekey {
 
     # If reduced redundancy is specified, or there are less than 4 hosts, force reduced redundancy
     If (($ReducedRedundancy -eq $true) -or ($HostCount.Value -lt 4)) {
-
-    }
+      $ReducedRedundancy = $true 
+   }
     # Determine Rekey Type for messaging
     Switch ($DeepRekey) {
         $true   { $ReKeyType = "deep"}
         default { $ReKeyType = "shallow"}
-    }
+   }
 
     # Determine Reduced Redundancy for messaging
-    Switch ($ReducedRedundancy) {
+   Switch ($ReducedRedundancy) {
         $true   { $RRMessage = "with reduced redundancy"}
         default { $RRMessage = ""}
-    }
+   }
 
-    # Echo task being performed
-    Write-Host "Executing $ReKeyType rekey of vSAN Cluster $VsanCluster $RRMessage"
+   # Echo task being performed
+   Write-Host "Executing $ReKeyType rekey of vSAN Cluster $VsanCluster $RRMessage"
 
-    # Execute the rekeying task
+   # Execute the rekeying task
         $ReKeyTask = $VsanVcClusterConfig.VsanEncryptedClusterRekey_Task($VsanCluster.ExtensionData.MoRef,$DeepRekey,$ReducedRedundancy)
-    }
+   }
 }
 
 Function Set-VsanEncryptionKms {
@@ -181,6 +320,7 @@ Function Set-VsanEncryptionKms {
             # Set the Reconfigure Specification to use the Data Encryption Configuration Spec
             $vsanReconfigSpec = New-Object VMware.Vsan.Views.VimVsanReconfigSpec
             $vsanReconfigSpec.DataEncryptionConfig = $DataEncryptionConfigSpec
+            $vsanReconfigSpec.AllowReducedRedundancy = $ReducedRedundancy
             
             # Execute the task of changing the KMS Cluster Profile Being Used
             $ChangeKmsTask = $VsanVcClusterConfig.VsanClusterReconfig($VsanCluster.ExtensionData.MoRef,$vsanReconfigSpec)
@@ -333,8 +473,9 @@ Function Get-VsanEncryptionDiskWiping {
 
 
 
-# Export Function for vSAN Rekeying
+
 Export-ModuleMember -Function Invoke-VsanEncryptionRekey
+Export-ModuleMember -Function Set-VsanEncryption
 Export-ModuleMember -Function Set-VsanEncryptionKms
 Export-ModuleMember -Function Get-VsanEncryptionKms
 Export-ModuleMember -Function Set-VsanEncryptionDiskWiping
